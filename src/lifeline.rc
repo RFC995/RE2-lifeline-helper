@@ -1,0 +1,26 @@
+#include <windows.h>
+#include "version.h"
+1 ICON "icon.ico"
+1 24 "app.manifest"
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION LLH_VERSION_MAJOR,LLH_VERSION_MINOR,LLH_VERSION_PATCH,LLH_VERSION_BUILD
+PRODUCTVERSION LLH_VERSION_MAJOR,LLH_VERSION_MINOR,LLH_VERSION_PATCH,LLH_VERSION_BUILD
+FILEOS 0x40004
+FILETYPE 0x1
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "081604b0"
+    BEGIN
+      VALUE "FileDescription", "LifeLine Helper - cheats para Resident Evil 2 Remake (single-player)"
+      VALUE "FileVersion", LLH_VERSION_STR
+      VALUE "ProductName", "LifeLine Helper"
+      VALUE "ProductVersion", LLH_VERSION_STR
+      VALUE "OriginalFilename", "LifeLineHelper.exe"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x816, 1200
+  END
+END
