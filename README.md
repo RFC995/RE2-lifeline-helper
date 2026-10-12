@@ -25,8 +25,10 @@ LifeLine Helper is a standalone Windows program. It needs no mod loader (no REFr
 | <kbd>F6</kbd> | **Infinite ammo** | Magazines never empty, so no reloading. Includes knife durability and grenades. |
 | <kbd>F7</kbd> | **Infinite items** | Herbs, sprays, ink ribbons and reserve ammo are never used up. |
 | <kbd>F8</kbd> | **One-hit kills** | Any hit takes an enemy's remaining health. |
+| <kbd>F9</kbd> | **Restore Mr. X's hat** | One-shot button: puts the hat back on Mr. X after you shoot it off. He must be nearby. |
 
 - Toggle any cheat at any time, from the window or with the hotkeys while the game is focused (a beep confirms).
+- The hat restore only undoes a hat you shot off. If the story itself removes the hat, the tool says so and changes nothing. The hat that fell may stay on the floor until you leave the area.
 - The game version is checked byte-for-byte before anything is touched; unknown builds are left alone.
 - No installation, no administrator rights, no network access. The interface is in Portuguese.
 
@@ -41,7 +43,7 @@ LifeLine Helper is a standalone Windows program. It needs no mod loader (no REFr
 2. Start the game.
 3. Run `LifeLineHelper.exe` (before or after the game, either works).
 4. Wait for the green **"Ligado ao RE2"** ("Connected to RE2") status line.
-5. Tick the cheats you want, or press <kbd>F5</kbd>–<kbd>F8</kbd> in-game.
+5. Tick the cheats you want, or press <kbd>F5</kbd>–<kbd>F9</kbd> in-game.
 6. Close the window when you are done: the game goes back to normal.
 
 ## FAQ
@@ -78,15 +80,16 @@ Please [open an issue](https://github.com/RFC995/RE2-lifeline-helper/issues) des
 
 ## How it works
 
-The tool finds `re2.exe`, checks the original bytes of three game functions, allocates a small block of memory next to the game module and redirects those functions there:
+The tool finds `re2.exe`, checks the original bytes of four game functions, allocates a small block of memory next to the game module and redirects those functions there:
 
 | Game function | Change while the cheat is on |
 |---|---|
 | `app.ropeway.HitPointController.addDamage` | Player: damage ignored. Enemies: damage = remaining health. |
 | `app.ropeway.HitPointController.checkDead` | Player: lethal attacks report "not dead". |
 | `app.ropeway.inventory.Slot.reduce` | Weapon or item slot: reports the amount as used without consuming anything. |
+| `app.ropeway.enemy.em6200.Em6200Think.onThinkUpdate` | Only when you ask for the hat: turns Mr. X's `OnHat` flag back on and calls the game's own `setHatDisp(true)`. |
 
-With a cheat off, the game runs its original code unchanged. The injected code is in [`src/patches.c`](src/patches.c), commented instruction by instruction.
+With a cheat off, the game runs its original code unchanged. The game's global flags and save files are never edited directly. The injected code is in [`src/patches.c`](src/patches.c), commented instruction by instruction.
 
 ## Building from source
 

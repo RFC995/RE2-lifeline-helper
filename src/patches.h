@@ -4,7 +4,7 @@
  * Alvo: re2.exe (Resident Evil 2 Remake, build sem ray tracing, TDB66,
  *       PE timestamp 2021-10-13). Os RVAs e bytes abaixo foram tirados deste executável.
  *
- * Três funções do jogo são desviadas para um bloco de código nosso ("cave"):
+ * Quatro funções do jogo são desviadas para um bloco de código nosso ("cave"):
  *
  *   app.ropeway.HitPointController.addDamage(int)   RVA 0xF9A080
  *       jogador/sobreviventes (tipo 0x8724) + invencível  -> sai sem dano
@@ -16,6 +16,10 @@
  *   app.ropeway.inventory.Slot.reduce(int)           RVA 0x51E620
  *       slot de arma  + munição infinita -> devolve N sem gastar
  *       slot de item  + itens infinitos  -> devolve N sem gastar
+ *
+ *   app.ropeway.enemy.em6200.Em6200Think.onThinkUpdate()   RVA 0x13A35E0   (Mr. X, 1x por frame)
+ *       só faz alguma coisa quando o programa pede para repor o chapéu (byte CAVE_HAT_OFFSET):
+ *       volta a ligar o bit FLAG.OnHat e chama setHatDisp(true), na thread do jogo.
  *
  * Convenção de chamada dos métodos do jogo: rcx = contexto da VM, rdx = this, r8 = 1.º argumento.
  */
@@ -33,11 +37,22 @@ enum {
     FLAG_COUNT = 4
 };
 
-#define CAVE_FLAGS_OFFSET 0x00   /* 4 bytes de flags no início do cave */
-#define CAVE_CODE_OFFSET  0x10
+/* Pedido de reposição do chapéu do Mr. X (byte em CAVE_HAT_OFFSET). */
+enum {
+    HAT_IDLE      = 0,   /* nada pedido                                                     */
+    HAT_REQUEST   = 1,   /* o programa pediu; o jogo trata no próximo onThinkUpdate          */
+    HAT_DONE      = 2,   /* chapéu reposto                                                   */
+    HAT_BLOCKED   = 3,   /* o jogo marcou o chapéu como perdido por uma flag da história     */
+    HAT_HAS_HAT   = 4    /* o Mr. X visto pelo jogo já tem chapéu (o pedido continua aberto) */
+};
+
+#define CAVE_FLAGS_OFFSET 0x00   /* 4 bytes de flags no início do cave; assinatura em 0x04..0x0F */
+#define CAVE_HAT_OFFSET   0x10   /* 1 byte: estado do pedido do chapéu (HAT_*)                    */
+#define CAVE_CODE_OFFSET  0x20
 #define CAVE_SIZE         0x400
 
-#define NUM_HOOKS 3
+#define NUM_HOOKS 4
+#define NUM_VERIFY 3
 #define MAX_STOLEN 16
 
 typedef struct {
@@ -50,6 +65,9 @@ typedef struct {
 
 /* Os sítios a desviar, com os bytes originais esperados. */
 extern const HookSite HOOK_SITES[NUM_HOOKS];
+
+/* Outros sítios que o código injetado usa (funções chamadas, ponteiro global): só são verificados. */
+extern const HookSite VERIFY_SITES[NUM_VERIFY];
 
 typedef struct {
     uint64_t target;                  /* endereço absoluto da função no jogo */

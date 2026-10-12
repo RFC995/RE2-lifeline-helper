@@ -2,11 +2,12 @@
  * LifeLine Helper - cheats para Resident Evil 2 Remake (versão sem ray tracing / TDB66)
  *
  * Programa independente: não precisa de REFramework nem de mods.
- * Liga-se ao re2.exe em execução, desvia 3 funções do jogo para um pequeno bloco de código
+ * Liga-se ao re2.exe em execução, desvia 4 funções do jogo para um pequeno bloco de código
  * (ver patches.c) e liga/desliga os cheats escrevendo flags nesse bloco.
  * Ao fechar o LifeLine Helper, o código original do jogo é reposto.
  *
- * Atalhos globais: F5 invencibilidade, F6 munição, F7 itens, F8 matar com um golpe.
+ * Atalhos globais: F5 invencibilidade, F6 munição, F7 itens, F8 matar com um golpe,
+ *                  F9 repor o chapéu do Mr. X.
  */
 #define WIN32_LEAN_AND_MEAN
 #ifndef UNICODE
@@ -29,7 +30,9 @@
 #define GAME_EXE  L"re2.exe"
 
 /* Assinatura escrita no cave (offset 4..15) para reconhecer patches de uma sessão anterior. */
-static const uint8_t CAVE_MAGIC[12] = { 'L', 'I', 'F', 'E', 'L', 'I', 'N', 'E', '-', 'v', '1', 0 };
+static const uint8_t CAVE_MAGIC[12]    = { 'L', 'I', 'F', 'E', 'L', 'I', 'N', 'E', '-', 'v', '2', 0 };
+/* Cave da versão 1.0 (3 funções, mesmos sítios 0..2): se ficou no jogo, repõe-se o código original. */
+static const uint8_t CAVE_MAGIC_V1[12] = { 'L', 'I', 'F', 'E', 'L', 'I', 'N', 'E', '-', 'v', '1', 0 };
 
 /* --------------------------------------------------------------------------------------------- */
 
@@ -63,13 +66,24 @@ static struct {
     DWORD    mismatch_since;   /* GetTickCount de quando os bytes começaram a não bater certo */
 } g;
 
-static HWND g_status, g_topmost, g_main;
+static HWND g_status, g_topmost, g_main, g_hat_status;
 static HFONT g_font, g_font_bold, g_font_small;
 static int g_dpi = 96;
 
 #define S(x) MulDiv((x), g_dpi, 96)
 
-enum { ID_CHEAT0 = 100, ID_ALL_OFF = 200, ID_TOPMOST = 201, ID_TIMER = 300, ID_HOTKEY0 = 400 };
+enum { ID_CHEAT0 = 100, ID_ALL_OFF = 200, ID_TOPMOST = 201, ID_HAT = 202,
+       ID_TIMER = 300, ID_HAT_TIMER = 301, ID_HOTKEY0 = 400, ID_HOTKEY_HAT = ID_HOTKEY0 + FLAG_COUNT };
+
+/* Pedido "repor o chapéu do Mr. X" em curso. */
+static struct {
+    BOOL  pending;
+    BOOL  from_hotkey;
+    DWORD last_tick;
+    DWORD fg_ms;        /* tempo com o jogo em primeiro plano desde o pedido */
+    DWORD has_hat_ms;   /* tempo em HAT_HAS_HAT */
+    BOOL  hotkey_ok;
+} g_hat;
 
 /* --------------------------------------------------------------------------------------------- */
 
@@ -182,8 +196,9 @@ static void write_flags(void) {
 static void detach(BOOL restore) {
     if (g.process) {
         if (restore && g.attached && WaitForSingleObject(g.process, 0) == WAIT_TIMEOUT) {
-            uint8_t zero[FLAG_COUNT] = { 0 };
+            uint8_t zero[FLAG_COUNT] = { 0 }, idle = HAT_IDLE;
             wpm(g.cave + CAVE_FLAGS_OFFSET, zero, sizeof(zero));
+            wpm(g.cave + CAVE_HAT_OFFSET, &idle, 1);
             suspend_game();
             for (int i = 0; i < NUM_HOOKS; i++)
                 write_code(g.patches[i].target, g.patches[i].original, g.patches[i].len);
@@ -195,7 +210,7 @@ static void detach(BOOL restore) {
     memset(&g, 0, sizeof(g));
 }
 
-typedef enum { SITE_ORIGINAL, SITE_OURS, SITE_UNKNOWN } SiteState;
+typedef enum { SITE_ORIGINAL, SITE_OURS, SITE_OLD, SITE_UNKNOWN } SiteState;
 
 static SiteState check_site(int i, uint64_t base, uint64_t *existing_cave) {
     const HookSite *s = &HOOK_SITES[i];
@@ -210,12 +225,25 @@ static SiteState check_site(int i, uint64_t base, uint64_t *existing_cave) {
         uint64_t dest = base + s->rva + 5 + (int64_t)rel;
         uint64_t cave = dest & ~0xFFFULL; /* o cave começa no início de uma página */
         uint8_t magic[sizeof(CAVE_MAGIC)];
-        if (rpm(cave + 4, magic, sizeof(magic)) && memcmp(magic, CAVE_MAGIC, sizeof(magic)) == 0) {
-            *existing_cave = cave;
-            return SITE_OURS;
+        if (rpm(cave + 4, magic, sizeof(magic))) {
+            if (memcmp(magic, CAVE_MAGIC, sizeof(magic)) == 0) {
+                *existing_cave = cave;
+                return SITE_OURS;
+            }
+            if (memcmp(magic, CAVE_MAGIC_V1, sizeof(magic)) == 0) return SITE_OLD;
         }
     }
     return SITE_UNKNOWN;
+}
+
+/* Funções e dados que o código injetado usa sem os desviar: têm de estar como esperado. */
+static BOOL verify_sites_ok(uint64_t base) {
+    for (int i = 0; i < NUM_VERIFY; i++) {
+        const HookSite *s = &VERIFY_SITES[i];
+        uint8_t cur[32];
+        if (!rpm(base + s->rva, cur, s->expected_len) || memcmp(cur, s->expected, s->expected_len) != 0) return FALSE;
+    }
+    return TRUE;
 }
 
 static void try_attach(void) {
@@ -247,21 +275,36 @@ static void try_attach(void) {
     }
     g.module_base = base;
 
-    /* Verificar os 3 sítios */
-    int n_orig = 0, n_ours = 0;
+    /* Verificar os sítios a desviar */
+    int n_orig = 0, n_ours = 0, n_old = 0;
+    SiteState states[NUM_HOOKS];
     uint64_t existing = 0, cave_seen = 0;
     BOOL caves_differ = FALSE;
     for (int i = 0; i < NUM_HOOKS; i++) {
-        SiteState st = check_site(i, base, &existing);
-        if (st == SITE_ORIGINAL) n_orig++;
-        else if (st == SITE_OURS) {
+        states[i] = check_site(i, base, &existing);
+        if (states[i] == SITE_ORIGINAL) n_orig++;
+        else if (states[i] == SITE_OLD) n_old++;
+        else if (states[i] == SITE_OURS) {
             n_ours++;
             if (cave_seen && cave_seen != existing) caves_differ = TRUE;
             cave_seen = existing;
         }
     }
 
-    if (n_orig + n_ours != NUM_HOOKS || caves_differ) {
+    BOOL verify_ok = verify_sites_ok(base);
+
+    /* Restos de uma versão anterior que não fechou bem: repor o código original desses sítios. */
+    if (n_old && n_orig + n_old == NUM_HOOKS && verify_ok) {
+        BOOL ok = TRUE;
+        suspend_game();
+        for (int i = 0; i < NUM_HOOKS; i++)
+            if (states[i] == SITE_OLD)
+                ok = write_code(base + HOOK_SITES[i].rva, HOOK_SITES[i].expected, HOOK_SITES[i].stolen_len) && ok;
+        resume_game();
+        if (ok) { n_orig += n_old; n_old = 0; }
+    }
+
+    if (n_orig + n_ours != NUM_HOOKS || caves_differ || !verify_ok) {
         DWORD now = GetTickCount();
         if (!g.mismatch_since) g.mismatch_since = now;
         CloseHandle(h);
@@ -288,6 +331,8 @@ static void try_attach(void) {
         }
         g.attached = TRUE;
         write_flags();
+        uint8_t idle = HAT_IDLE;
+        wpm(g.cave + CAVE_HAT_OFFSET, &idle, 1);
         set_status(L"Ligado ao RE2 (processo %lu). Escolhe os cheats abaixo.", pid);
         return;
     }
@@ -373,6 +418,81 @@ static void set_cheat(int i, BOOL on, BOOL from_hotkey) {
     }
 }
 
+/* ------------------------------------------------------------------ chapéu do Mr. X */
+
+static void hat_finish(const wchar_t *msg, BOOL good) {
+    if (g.attached) {
+        uint8_t idle = HAT_IDLE;
+        wpm(g.cave + CAVE_HAT_OFFSET, &idle, 1);
+    }
+    if (g_hat.pending) KillTimer(g_main, ID_HAT_TIMER);
+    if (g_hat.from_hotkey) {
+        HANDLE t = CreateThread(NULL, 0, good ? beep_on_thread : beep_off_thread, NULL, 0, NULL);
+        if (t) CloseHandle(t);
+    }
+    g_hat.pending = FALSE;
+    SetWindowTextW(g_hat_status, msg);
+}
+
+static BOOL game_in_foreground(void) {
+    DWORD pid = 0;
+    HWND fg = GetForegroundWindow();
+    if (fg) GetWindowThreadProcessId(fg, &pid);
+    return pid != 0 && pid == g.pid;
+}
+
+static void request_hat(BOOL from_hotkey) {
+    g_hat.from_hotkey = from_hotkey;
+    if (!g.attached) {
+        g_hat.pending = FALSE;
+        hat_finish(L"Primeiro abre o jogo e espera pela ligação.", FALSE);
+        return;
+    }
+    uint8_t req = HAT_REQUEST;
+    if (!wpm(g.cave + CAVE_HAT_OFFSET, &req, 1)) {
+        g_hat.pending = FALSE;
+        hat_finish(L"Não foi possível falar com o jogo.", FALSE);
+        return;
+    }
+    g_hat.pending = TRUE;
+    g_hat.last_tick = GetTickCount();
+    g_hat.fg_ms = 0;
+    g_hat.has_hat_ms = 0;
+    SetWindowTextW(g_hat_status, L"A repor... (volta ao jogo, com o Mr. X por perto)");
+    SetTimer(g_main, ID_HAT_TIMER, 200, NULL);
+}
+
+static void poll_hat(void) {
+    if (!g_hat.pending) { KillTimer(g_main, ID_HAT_TIMER); return; }
+    if (!g.attached) { hat_finish(L"O jogo fechou.", FALSE); return; }
+
+    DWORD now = GetTickCount(), dt = now - g_hat.last_tick;
+    g_hat.last_tick = now;
+    if (game_in_foreground()) g_hat.fg_ms += dt;
+
+    uint8_t st = HAT_IDLE;
+    if (!rpm(g.cave + CAVE_HAT_OFFSET, &st, 1)) { hat_finish(L"Não foi possível falar com o jogo.", FALSE); return; }
+
+    switch (st) {
+    case HAT_DONE:
+        hat_finish(L"Chapéu do Mr. X reposto.", TRUE);
+        break;
+    case HAT_BLOCKED:
+        hat_finish(L"Não dá: nesta parte da história é o próprio jogo que lhe tira o chapéu.", FALSE);
+        break;
+    case HAT_HAS_HAT:
+        g_hat.has_hat_ms += dt;
+        if (g_hat.has_hat_ms >= 600) hat_finish(L"O Mr. X já tem o chapéu.", FALSE);
+        break;
+    case HAT_REQUEST:
+        if (g_hat.fg_ms >= 5000) hat_finish(L"O Mr. X não está por perto. Tenta outra vez quando ele aparecer.", FALSE);
+        break;
+    default:
+        hat_finish(L"", FALSE);
+        break;
+    }
+}
+
 /* --------------------------------------------------------------------------------------------- */
 
 static HWND add_label(HWND parent, const wchar_t *text, int x, int y, int w, int h, HFONT font) {
@@ -398,6 +518,12 @@ static void create_controls(HWND hwnd) {
     }
 
     y += 6;
+    HWND hat = CreateWindowExW(0, L"BUTTON", L"Repor o chapéu do Mr. X   [F9]", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                               S(16), S(y), S(230), S(28), hwnd, (HMENU)ID_HAT, NULL, NULL);
+    SendMessageW(hat, WM_SETFONT, (WPARAM)g_font, TRUE);
+    g_hat_status = add_label(hwnd, L"", 256, y - 2, 184, 34, g_font_small);
+
+    y += 44;
     HWND all_off = CreateWindowExW(0, L"BUTTON", L"Desligar tudo", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                                    S(16), S(y), S(130), S(28), hwnd, (HMENU)ID_ALL_OFF, NULL, NULL);
     SendMessageW(all_off, WM_SETFONT, (WPARAM)g_font, TRUE);
@@ -407,7 +533,7 @@ static void create_controls(HWND hwnd) {
     SendMessageW(g_topmost, WM_SETFONT, (WPARAM)g_font, TRUE);
 
     y += 42;
-    add_label(hwnd, L"Os atalhos F5 a F8 funcionam com o jogo aberto à frente (ouve-se um bip).\n"
+    add_label(hwnd, L"Os atalhos F5 a F9 funcionam com o jogo aberto à frente (ouve-se um bip).\n"
                     L"Ao fechar esta janela, o jogo volta ao normal.", 16, y, 420, 40, g_font_small);
 }
 
@@ -420,9 +546,11 @@ static void register_hotkeys(HWND hwnd) {
             wcsncat(missing, g_cheats[i].key, 63 - wcslen(missing));
         }
     }
+    g_hat.hotkey_ok = RegisterHotKey(hwnd, ID_HOTKEY_HAT, 0x4000 /* MOD_NOREPEAT */, VK_F9);
+    if (!g_hat.hotkey_ok) wcsncat(missing, L" F9", 63 - wcslen(missing));
     if (missing[0]) {
         wchar_t msg[200];
-        _snwprintf(msg, 199, L"Atenção: outro programa já usa a(s) tecla(s)%ls. Usa as caixas na janela.", missing);
+        _snwprintf(msg, 199, L"Atenção: outro programa já usa a(s) tecla(s)%ls. Usa os botões na janela.", missing);
         msg[199] = 0;
         MessageBoxW(hwnd, msg, APP_TITLE, MB_OK | MB_ICONINFORMATION);
     }
@@ -439,6 +567,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_TIMER:
         if (wp == ID_TIMER) on_timer();
+        else if (wp == ID_HAT_TIMER) poll_hat();
         return 0;
 
     case WM_COMMAND: {
@@ -446,6 +575,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (id >= ID_CHEAT0 && id < ID_CHEAT0 + FLAG_COUNT) {
             int i = id - ID_CHEAT0;
             set_cheat(i, SendMessageW(g_cheats[i].hwnd, BM_GETCHECK, 0, 0) == BST_CHECKED, FALSE);
+        } else if (id == ID_HAT) {
+            request_hat(FALSE);
         } else if (id == ID_ALL_OFF) {
             for (int i = 0; i < FLAG_COUNT; i++) set_cheat(i, FALSE, FALSE);
         } else if (id == ID_TOPMOST) {
@@ -458,6 +589,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_HOTKEY: {
         int i = (int)wp - ID_HOTKEY0;
         if (i >= 0 && i < FLAG_COUNT) set_cheat(i, !g_cheats[i].on, TRUE);
+        else if ((int)wp == ID_HOTKEY_HAT) request_hat(TRUE);
         return 0;
     }
 
@@ -470,7 +602,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_DESTROY:
         KillTimer(hwnd, ID_TIMER);
+        KillTimer(hwnd, ID_HAT_TIMER);
         for (int i = 0; i < FLAG_COUNT; i++) UnregisterHotKey(hwnd, ID_HOTKEY0 + i);
+        UnregisterHotKey(hwnd, ID_HOTKEY_HAT);
         detach(TRUE);
         PostQuitMessage(0);
         return 0;
