@@ -1,10 +1,16 @@
-# LifeLine Helper
+<p align="center"><img src="icon.png" width="128" alt="LifeLine Helper icon"></p>
 
-**A small, open-source cheat tool for Resident Evil 2 (2019) on PC — single-player only.**
+<h1 align="center">LifeLine Helper</h1>
+
+<p align="center"><b>A small, open-source cheat tool for Resident Evil 2 (2019) on PC — single-player only.</b></p>
+
+<div align="center">
 
 [![Latest release](https://img.shields.io/github/v/release/RFC995/RE2-lifeline-helper?include_prereleases&label=release)](https://github.com/RFC995/RE2-lifeline-helper/releases)
 [![Downloads](https://img.shields.io/github/downloads/RFC995/RE2-lifeline-helper/total)](https://github.com/RFC995/RE2-lifeline-helper/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+</div>
 
 LifeLine Helper is a standalone Windows program. It needs no mod loader (no REFramework, no Fluffy Mod Manager) and **never modifies any game file**: changes exist only in memory while the tool is open, and are reverted when you close it.
 
